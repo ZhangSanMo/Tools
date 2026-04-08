@@ -1,6 +1,6 @@
-; AutoHotkey v2 脚本：Word & Excel 文本批量替换 GUI 版
+; AutoHotkey v2 脚本：Office 文档批量替换工具
 ; 日期：2024
-; 版本：3.0 - 增加 Excel 支持，大幅优化批处理性能，增加临时文件过滤
+; 版本：4.0 - 增加规则导入导出功能 (CSV 格式)，完美兼容 Excel 编排规则
 
 #Requires AutoHotkey v2.0
 #SingleInstance Force
@@ -10,8 +10,7 @@ try {
     global MyGui := Gui(, "Office 文档批量替换工具 (Word/Excel)")
     MyGui.SetFont("s10")
 
-    ; --- 文件夹选择区 ---
-    ; 调整了 GroupBox 高度，内部控件使用统一的左边距 x26
+    ; --- 第一步：文件夹选择区 ---
     MyGui.Add("GroupBox", "x10 y10 w520 h115", "第一步：选择目标及文件类型")
     
     MyGui.Add("Text", "x26 y35", "文件夹路径:")
@@ -21,27 +20,27 @@ try {
     global RecursiveCheck := MyGui.Add("Checkbox", "x26 y+15 vIsRecursive Checked", "包含所有子文件夹")
     
     global ProcessWordCheck := MyGui.Add("Checkbox", "x26 y+10 vProcessWord Checked", "处理 Word 文件 (*.doc, *.docx)")
-    ; 增加间距并确保与 Word 选项在同一行
     global ProcessExcelCheck := MyGui.Add("Checkbox", "x+30 yp vProcessExcel Checked", "处理 Excel 文件 (*.xls, *.xlsx)")
 
-    ; --- 替换规则管理区 ---
-    ; 修复了偏移问题，强制设为 x10 与第一步对齐
+    ; --- 第二步：替换规则管理区 ---
     MyGui.Add("GroupBox", "x10 y140 w520 h250", "第二步：管理替换规则")
     
     MyGui.Add("Text", "x26 y165", "规则列表 (双击可修改):")
     
-    ; 调整列表宽度，刚好适应 GroupBox
     global ReplacementsLV := MyGui.Add("ListView", "x26 y+10 w488 h150 HScroll Grid vReplacementsLV", ["查找内容", "替换为"])
     ReplacementsLV.ModifyCol(1, "240")
     ReplacementsLV.ModifyCol(2, "240")
     ReplacementsLV.OnEvent("DoubleClick", EditReplacement)
 
-    ; 精确计算按钮位置，使其右对齐
-    MyGui.Add("Button", "x344 y+10 w80", "添加...").OnEvent("Click", AddReplacement)
+    ; 新增：导入与导出按钮（居左对齐）
+    MyGui.Add("Button", "x26 y+10 w80", "导入规则").OnEvent("Click", ImportRules)
+    MyGui.Add("Button", "x+10 yp w80", "导出规则").OnEvent("Click", ExportRules)
+
+    ; 添加与删除按钮（居右对齐，x344 是精确计算出的右侧对齐位置）
+    MyGui.Add("Button", "x344 yp w80", "添加...").OnEvent("Click", AddReplacement)
     MyGui.Add("Button", "x+10 yp w80", "删除选中").OnEvent("Click", DeleteReplacement)
 
-    ; --- 执行与状态区 ---
-    ; 强制 x10 对齐
+    ; --- 第三步：执行与状态区 ---
     MyGui.Add("GroupBox", "x10 y405 w520 h80", "第三步：开始执行")
     
     global StartButton := MyGui.Add("Button", "x26 y430 w120 h40", "开始替换").OnEvent("Click", StartProcessing)
@@ -51,12 +50,102 @@ try {
     ReplacementsLV.Add(, "旧文本", "新文本")
 
     MyGui.OnEvent("Close", (*) => ExitApp())
-    MyGui.Show("w540 h500") ; 调整了整体窗口高度以适配布局
+    MyGui.Show("w540 h500")
 } catch as e {
     MsgBox "创建 GUI 失败! `n错误: " e.Message
 }
 
-; === GUI 事件处理函数 ===
+; === 导入与导出功能 ===
+ImportRules(*) {
+    loadPath := FileSelect("3", "", "导入替换规则", "CSV 文件 (*.csv)")
+    if (loadPath = "")
+        return
+        
+    if ReplacementsLV.GetCount() > 0 {
+        ans := MsgBox("是否清空当前已有规则？`n`n选择【是】清空并导入`n选择【否】在末尾追加", "导入选项", "YesNoCancel Icon?")
+        if (ans = "Cancel")
+            return
+        if (ans = "Yes")
+            ReplacementsLV.Delete()
+    }
+    
+    try {
+        ; 读取文件，Excel 默认支持带有 BOM 的 UTF-8 或 ANSI
+        fileContent := FileRead(loadPath, "UTF-8")
+        addedCount := 0
+        
+        ; 逐行解析
+        Loop Parse, fileContent, "`n", "`r" {
+            line := Trim(A_LoopField)
+            ; 跳过空行和表头
+            if (line = "" || (A_Index = 1 && InStr(line, "查找内容")))
+                continue
+                
+            fields := []
+            ; 利用 AHK 自带的 CSV 解析能力处理逗号和引号
+            Loop Parse, line, "CSV"
+                fields.Push(A_LoopField)
+            
+            if (fields.Length >= 1) {
+                oldT := fields[1]
+                newT := fields.Length >= 2 ? fields[2] : ""
+                if (oldT != "") {
+                    ReplacementsLV.Add(, oldT, newT)
+                    addedCount++
+                }
+            }
+        }
+        MsgBox "导入完成！共成功导入 " addedCount " 条规则。", "提示"
+    } catch as e {
+        MsgBox "读取文件失败！请确保文件未被其他程序占用或格式正确。`n" e.Message, "错误"
+    }
+}
+
+ExportRules(*) {
+    if ReplacementsLV.GetCount() = 0 {
+        MsgBox "规则列表为空，无需导出。", "提示"
+        return
+    }
+    
+    savePath := FileSelect("S16", "替换规则.csv", "导出替换规则", "CSV 文件 (*.csv)")
+    if (savePath = "")
+        return
+    
+    ; 自动补充后缀名
+    if !RegExMatch(savePath, "\.[a-zA-Z0-9]+$")
+        savePath .= ".csv"
+        
+    try {
+        if FileExist(savePath)
+            FileDelete(savePath)
+        
+        ; 写入时使用 UTF-8 (含BOM)，确保生成的 CSV 在 Excel 中打开不会乱码
+        fileObj := FileOpen(savePath, "w", "UTF-8")
+        fileObj.WriteLine("查找内容,替换为")
+        
+        Loop ReplacementsLV.GetCount() {
+            oldT := ReplacementsLV.GetText(A_Index, 1)
+            newT := ReplacementsLV.GetText(A_Index, 2)
+            fileObj.WriteLine(EscapeCSV(oldT) "," EscapeCSV(newT))
+        }
+        
+        fileObj.Close()
+        MsgBox "导出成功！`n已保存至: " savePath, "提示"
+    } catch as e {
+        MsgBox "导出失败！`n错误信息: " e.Message, "错误"
+    }
+}
+
+; 辅助函数：处理 CSV 格式中包含逗号或引号的情况
+EscapeCSV(str) {
+    if InStr(str, ",") || InStr(str, "`"") {
+        str := StrReplace(str, "`"", "`"`"") ; 引号翻倍以转义
+        str := "`"" str "`"" ; 两边加上双引号
+    }
+    return str
+}
+
+; === GUI 基础事件处理函数 ===
 SelectFolder(*) {
     try {
         selectedFolder := DirSelect(, 3, "请选择包含文档的文件夹")
@@ -118,7 +207,6 @@ StartProcessing(*) {
     MyGui.Opt("+Disabled")
     StatusText.Value := "正在扫描文件..."
 
-    ; 提取替换规则
     replacements := Map()
     Loop ReplacementsLV.GetCount() {
         replacements[ReplacementsLV.GetText(A_Index, 1)] := ReplacementsLV.GetText(A_Index, 2)
@@ -129,13 +217,11 @@ StartProcessing(*) {
     if FileExist(errorLogFile)
         FileDelete(errorLogFile)
 
-    ; 收集符合条件的文件，并过滤掉 "~$" 开头的 Office 临时隐藏文件
     fileList := []
     Loop Files, folderPath "\*.*", (isRecursive ? "RF" : "F") {
         ext := StrLower(A_LoopFileExt)
         fileName := A_LoopFileName
         
-        ; 忽略临时文件
         if InStr(fileName, "~$") = 1
             continue
             
@@ -152,11 +238,9 @@ StartProcessing(*) {
     }
 
     StatusText.Value := "正在启动 Office 进程..."
-    
     wordApp := ""
     excelApp := ""
     
-    ; 性能优化：在循环外部预先启动需要的 COM 进程
     try {
         if processWord {
             wordApp := ComObject("Word.Application")
@@ -181,7 +265,6 @@ StartProcessing(*) {
     processedCount := 0
     errorCount := 0
 
-    ; 开始遍历处理文件
     for index, currentFile in fileList {
         fileName := StrSplit(currentFile, "\").Pop()
         StatusText.Value := "进度: " index "/" totalFiles "`n正在处理: " fileName
@@ -189,16 +272,14 @@ StartProcessing(*) {
 
         try {
             if InStr(ext, "doc") = 1 {
-                ; 处理 Word
                 doc := wordApp.Documents.Open(currentFile)
                 ProcessSingleDocument(doc, replacements)
-                doc.Close(-1) ; -1 对应 wdSaveChanges
+                doc.Close(-1)
             } 
             else if InStr(ext, "xls") = 1 {
-                ; 处理 Excel
                 wb := excelApp.Workbooks.Open(currentFile)
                 ProcessSingleExcel(wb, replacements)
-                wb.Close(1) ; 1 对应 xlSaveChanges
+                wb.Close(1)
             }
             processedCount++
         } catch as e {
@@ -208,10 +289,9 @@ StartProcessing(*) {
         }
     }
 
-    ; 清理并退出 Office 进程
     StatusText.Value := "正在清理并关闭后台进程..."
     if IsObject(wordApp)
-        try wordApp.Quit(0) ; 0 对应 wdDoNotSaveChanges (文件已在此前保存)
+        try wordApp.Quit(0)
     if IsObject(excelApp)
         try excelApp.Quit()
 
@@ -245,7 +325,7 @@ ProcessSingleDocument(doc, replacements) {
                 for oldText, newText in replacements {
                     findObj.Text := oldText
                     repl.Text := newText
-                    findObj.Execute(,,,,,,,,,, 2) ; 2 = wdReplaceAll
+                    findObj.Execute(,,,,,,,,,, 2)
                 }
                 range := range.NextStoryRange
             }
@@ -260,7 +340,6 @@ ProcessSingleExcel(wb, replacements) {
     for ws in wb.Worksheets {
         for oldText, newText in replacements {
             try {
-                ; 参数：What, Replacement, LookAt (2=xlPart 局部匹配)
                 ws.Cells.Replace(oldText, newText, 2)
             } catch {
                 continue
