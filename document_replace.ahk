@@ -1,6 +1,6 @@
 ; AutoHotkey v2 脚本：Office 文档批量替换工具
 ; 日期：2024
-; 版本：4.0 - 增加规则导入导出功能 (CSV 格式)，完美兼容 Excel 编排规则
+; 版本：4.1 - 修复 Map 无序导致的短词优先覆盖长词的严重 Bug，强制按界面列表顺序依次替换
 
 #Requires AutoHotkey v2.0
 #SingleInstance Force
@@ -25,18 +25,18 @@ try {
     ; --- 第二步：替换规则管理区 ---
     MyGui.Add("GroupBox", "x10 y140 w520 h250", "第二步：管理替换规则")
     
-    MyGui.Add("Text", "x26 y165", "规则列表 (双击可修改):")
+    MyGui.Add("Text", "x26 y165", "规则列表 (双击可修改/注意：长词请尽量排在上方):")
     
     global ReplacementsLV := MyGui.Add("ListView", "x26 y+10 w488 h150 HScroll Grid vReplacementsLV", ["查找内容", "替换为"])
     ReplacementsLV.ModifyCol(1, "240")
     ReplacementsLV.ModifyCol(2, "240")
     ReplacementsLV.OnEvent("DoubleClick", EditReplacement)
 
-    ; 新增：导入与导出按钮（居左对齐）
+    ; 导入与导出按钮
     MyGui.Add("Button", "x26 y+10 w80", "导入规则").OnEvent("Click", ImportRules)
     MyGui.Add("Button", "x+10 yp w80", "导出规则").OnEvent("Click", ExportRules)
 
-    ; 添加与删除按钮（居右对齐，x344 是精确计算出的右侧对齐位置）
+    ; 添加与删除按钮
     MyGui.Add("Button", "x344 yp w80", "添加...").OnEvent("Click", AddReplacement)
     MyGui.Add("Button", "x+10 yp w80", "删除选中").OnEvent("Click", DeleteReplacement)
 
@@ -45,9 +45,6 @@ try {
     
     global StartButton := MyGui.Add("Button", "x26 y430 w120 h40", "开始替换").OnEvent("Click", StartProcessing)
     global StatusText := MyGui.Add("Text", "x+15 yp+10 w350", "状态：准备就绪。")
-
-    ; --- 初始化默认规则 ---
-    ReplacementsLV.Add(, "旧文本", "新文本")
 
     MyGui.OnEvent("Close", (*) => ExitApp())
     MyGui.Show("w540 h500")
@@ -70,22 +67,15 @@ ImportRules(*) {
     }
     
     try {
-        ; 读取文件，Excel 默认支持带有 BOM 的 UTF-8 或 ANSI
         fileContent := FileRead(loadPath, "UTF-8")
         addedCount := 0
-        
-        ; 逐行解析
         Loop Parse, fileContent, "`n", "`r" {
             line := Trim(A_LoopField)
-            ; 跳过空行和表头
             if (line = "" || (A_Index = 1 && InStr(line, "查找内容")))
                 continue
-                
             fields := []
-            ; 利用 AHK 自带的 CSV 解析能力处理逗号和引号
             Loop Parse, line, "CSV"
                 fields.Push(A_LoopField)
-            
             if (fields.Length >= 1) {
                 oldT := fields[1]
                 newT := fields.Length >= 2 ? fields[2] : ""
@@ -106,29 +96,22 @@ ExportRules(*) {
         MsgBox "规则列表为空，无需导出。", "提示"
         return
     }
-    
     savePath := FileSelect("S16", "替换规则.csv", "导出替换规则", "CSV 文件 (*.csv)")
     if (savePath = "")
         return
-    
-    ; 自动补充后缀名
     if !RegExMatch(savePath, "\.[a-zA-Z0-9]+$")
         savePath .= ".csv"
         
     try {
         if FileExist(savePath)
             FileDelete(savePath)
-        
-        ; 写入时使用 UTF-8 (含BOM)，确保生成的 CSV 在 Excel 中打开不会乱码
         fileObj := FileOpen(savePath, "w", "UTF-8")
         fileObj.WriteLine("查找内容,替换为")
-        
         Loop ReplacementsLV.GetCount() {
             oldT := ReplacementsLV.GetText(A_Index, 1)
             newT := ReplacementsLV.GetText(A_Index, 2)
             fileObj.WriteLine(EscapeCSV(oldT) "," EscapeCSV(newT))
         }
-        
         fileObj.Close()
         MsgBox "导出成功！`n已保存至: " savePath, "提示"
     } catch as e {
@@ -136,11 +119,10 @@ ExportRules(*) {
     }
 }
 
-; 辅助函数：处理 CSV 格式中包含逗号或引号的情况
 EscapeCSV(str) {
     if InStr(str, ",") || InStr(str, "`"") {
-        str := StrReplace(str, "`"", "`"`"") ; 引号翻倍以转义
-        str := "`"" str "`"" ; 两边加上双引号
+        str := StrReplace(str, "`"", "`"`"")
+        str := "`"" str "`""
     }
     return str
 }
@@ -195,7 +177,7 @@ StartProcessing(*) {
     processWord := ProcessWordCheck.Value
     processExcel := ProcessExcelCheck.Value
     if (!processWord && !processExcel) {
-        MsgBox "错误：请至少选择一种要处理的文件类型（Word 或 Excel）。", "错误"
+        MsgBox "错误：请至少选择一种要处理的文件类型。", "错误"
         return
     }
 
@@ -207,9 +189,10 @@ StartProcessing(*) {
     MyGui.Opt("+Disabled")
     StatusText.Value := "正在扫描文件..."
 
-    replacements := Map()
+    ; 【关键修复】：将 Map() 改为严格有序的 Array()，保证执行顺序与 GUI 列表一致
+    replacements := []
     Loop ReplacementsLV.GetCount() {
-        replacements[ReplacementsLV.GetText(A_Index, 1)] := ReplacementsLV.GetText(A_Index, 2)
+        replacements.Push({OldText: ReplacementsLV.GetText(A_Index, 1), NewText: ReplacementsLV.GetText(A_Index, 2)})
     }
 
     isRecursive := RecursiveCheck.Value
@@ -221,10 +204,8 @@ StartProcessing(*) {
     Loop Files, folderPath "\*.*", (isRecursive ? "RF" : "F") {
         ext := StrLower(A_LoopFileExt)
         fileName := A_LoopFileName
-        
         if InStr(fileName, "~$") = 1
             continue
-            
         if (processWord && InStr(ext, "doc") = 1) || (processExcel && InStr(ext, "xls") = 1) {
             fileList.Push(A_LoopFileFullPath)
         }
@@ -253,7 +234,7 @@ StartProcessing(*) {
             excelApp.DisplayAlerts := false
         }
     } catch as e {
-        MsgBox "启动 Office 进程失败，请确保电脑已安装对应的软件。`n" e.Message, "环境错误"
+        MsgBox "启动 Office 进程失败。`n" e.Message, "环境错误"
         if wordApp
             wordApp.Quit()
         if excelApp
@@ -296,9 +277,8 @@ StartProcessing(*) {
         try excelApp.Quit()
 
     finalMessage := "✅ 处理完成！`n`n成功处理 " processedCount " 个文件。`n失败 " errorCount " 个。"
-    if (errorCount > 0) {
+    if (errorCount > 0)
         finalMessage .= "`n`n失败详情请查看日志文件：`n" errorLogFile
-    }
     StatusText.Value := "状态：处理完成。"
     MyGui.Opt("-Disabled")
     MsgBox finalMessage, "任务完成"
@@ -322,9 +302,10 @@ ProcessSingleDocument(doc, replacements) {
                 repl := findObj.Replacement
                 repl.ClearFormatting()
 
-                for oldText, newText in replacements {
-                    findObj.Text := oldText
-                    repl.Text := newText
+                ; 【关键修复】：按 Array 数组顺序执行
+                for _, rule in replacements {
+                    findObj.Text := rule.OldText
+                    repl.Text := rule.NewText
                     findObj.Execute(,,,,,,,,,, 2)
                 }
                 range := range.NextStoryRange
@@ -338,9 +319,10 @@ ProcessSingleDocument(doc, replacements) {
 ; === 函数：对单个 Excel 文档执行所有替换操作 ===
 ProcessSingleExcel(wb, replacements) {
     for ws in wb.Worksheets {
-        for oldText, newText in replacements {
+        ; 【关键修复】：按 Array 数组顺序执行
+        for _, rule in replacements {
             try {
-                ws.Cells.Replace(oldText, newText, 2)
+                ws.Cells.Replace(rule.OldText, rule.NewText, 2)
             } catch {
                 continue
             }
